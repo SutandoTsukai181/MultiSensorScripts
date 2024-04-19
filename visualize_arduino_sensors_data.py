@@ -5,15 +5,18 @@ import pandas as pd
 import plotly.express as px
 from dash import Dash, Input, Output, callback, dcc, html
 import serial
+import time
 
 df = pd.DataFrame(columns=['Quat W', 'Quat X', 'Quat Y', 'Quat Z'])
 df.index.name = "1 SECOND"
 
 # Initialize serial connection
 ser = serial.Serial('COM3', 115200)
-# ser.write(b'g')
+time.sleep(1)
+ser.write(b'g')
+time.sleep(1)
 
-time = 0
+time_var = 0
 
 @callback(
     Output("graph-content", "figure"),
@@ -27,25 +30,28 @@ def update_graph_dropdown(
     axis_checklist_values
     ):
     
-    global time, df
+    global time_var, df
 
     # Read data from serial port
-    # ser.write(b'g')
-    text = ser.readline().decode('ascii')
+    ser.write(b'g')
+    time.sleep(1)
+    text = ser.read_until().decode('ascii')
+    print(f'text: {text}')
 
     # Split the text into a list of integers
     try:
         vals = [int(x) for x in text.split(',')]
+        
+        print(vals)
+        df.loc[time_var] = vals
+
+        # Keep last 30 seconds
+        df = df.tail(90)
+
+        time_var += 0.3
     except:
-        return
+        pass
 
-    print(vals)
-    df.loc[time] = vals
-
-    # Keep last 30 seconds
-    df = df.tail(90)
-
-    time += 0.3
 
     fig = px.line(
         df,
@@ -78,7 +84,7 @@ def main():
             dcc.Graph(id="graph-content"),
             dcc.Interval(
                 id='interval-component',
-                interval=100, # in milliseconds
+                interval=1000, # in milliseconds
                 n_intervals=0
             ),
         ]
