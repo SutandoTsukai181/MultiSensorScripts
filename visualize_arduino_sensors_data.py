@@ -1,96 +1,143 @@
-import itertools
-import sys
-
 import pandas as pd
-import plotly.express as px
-from dash import Dash, Input, Output, callback, dcc, html
 import serial
 import time
+import os
 
-df = pd.DataFrame(columns=['Quat W', 'Quat X', 'Quat Y', 'Quat Z'])
-df.index.name = "1 SECOND"
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+
+from matplotlib.widgets import Button
+
+import mplcursors
+import datetime
+
+# Index of vector to be plotted
+VECTOR_TO_PLOT = 0
+
+# Number of vectors to read from serial port (example: World Acceleration, Gravity)
+VECTOR_COUNT = 1
+
+# Length of vector (example: x, y, z)
+VECTOR_SIZE = 3
+
+dfs = []
+for i in range(VECTOR_COUNT):
+    dfs.append(pd.DataFrame(columns=[f"Axis {i}" for i in range(VECTOR_SIZE)]))
+    dfs[i].index.name = "1 SECOND"
 
 # Initialize serial connection
-ser = serial.Serial('COM3', 115200)
-time.sleep(1)
-ser.write(b'g')
+ser = serial.Serial("COM4", 115200, timeout=0.066)
+time.sleep(2)
+ser.write(b"g")
 time.sleep(1)
 
 time_var = 0
 
-@callback(
-    Output("graph-content", "figure"),
-    Input('interval-component', 'n_intervals'),
-    Input("type-checklist-selection", "value"),
-    Input("axis-checklist-selection", "value"),
-)
-def update_graph_dropdown(
-    n,
-    type_checklist_values,
-    axis_checklist_values
-    ):
-    
-    global time_var, df
+fig, ax = plt.subplots()
+fig.subplots_adjust(bottom=0.2)
+
+axclear = fig.add_axes([0.66, 0.03, 0.1, 0.07])
+bclear = Button(axclear, "Clear")
+
+axpause = fig.add_axes([0.78, 0.03, 0.1, 0.07])
+bpause = Button(axpause, "Pause")
+
+anim = None
+anim_running = True
+
+
+def onClickClear(event):
+    global ax, dfs, time_var
+    for i in range(len(dfs)):
+        dfs[i] = dfs[i].iloc[0:0]
+
+    time_var = 0
+
+    ax.clear()
+    fig.canvas.draw()
+
+
+def onClickPause(event):
+    global anim_running, bpause
+    if anim_running:
+        anim.pause()
+        anim_running = False
+        bpause.label.set_visible(False)
+        bpause.label2.set_visible(True)
+    else:
+        anim.resume()
+        anim_running = True
+        bpause.label.set_visible(True)
+        bpause.label2.set_visible(False)
+
+
+def animate(i):
+    global dfs, ax, time_var
 
     # Read data from serial port
-    ser.write(b'g')
-    time.sleep(1)
-    text = ser.read_until().decode('ascii')
-    print(f'text: {text}')
+    ser.write(b"g")
+    # time.sleep(0.05)
+
+    data = []
+    for i in range(VECTOR_COUNT):
+        text = ser.read_until().decode("ascii").strip()
+        data.append(text)
+        # print(f"text: \t{text}")
 
     # Split the text into a list of integers
     try:
-        vals = [int(x) for x in text.split(',')]
-        
-        print(vals)
-        df.loc[time_var] = vals
+        for i in range(VECTOR_COUNT):
+            if len(data[i]) == 0:
+                continue
 
-        # Keep last 30 seconds
-        df = df.tail(90)
+            vals = [float(x) for x in data[i].split("\t")]
 
-        time_var += 0.3
-    except:
+            if len(vals) == VECTOR_SIZE:
+                dfs[i].loc[time_var] = vals
+
+                # Keep last 15 seconds
+                dfs[i] = dfs[i].tail(1500)
+
+        time_var += 0.033
+    except Exception as e:
+        print(f"Error in data: {data}")
+        print(e)
+        print()
         pass
 
+    ax.clear()  # Clear last data frame
+    lines = ax.plot(dfs[VECTOR_TO_PLOT])  # Plot new data frame
+    ax.grid()
 
-    fig = px.line(
-        df,
-        title='MPU 6050',
-        labels=dict(variable="Column Name", value="Value"),
-    )
-    fig.update_traces(mode="lines", hovertemplate="%{y}")
-    fig.update_layout(hovermode="x unified", xaxis_title="Time (s)")
+    ax.set_title("Arduino Data")  # Set title of figure
+    ax.set_ylabel("Value")  # Set title of y axis
 
-    return fig
+    return lines
 
 
 def main():
-    app = Dash(__name__, external_stylesheets=["https://codepen.io/chriddyp/pen/bWLwgP.css"])
+    global anim, ax
+    anim = animation.FuncAnimation(fig, animate, interval=33, cache_frame_data=False)
 
-    app.layout = html.Div(
-        [
-            dcc.Checklist(
-                options={"Acc": "Acc", "Gyro": "Gyro", "Quat": "Quat", "Mag": "Mag"},
-                value=["Acc", "Gyro", "Quat", "W"],
-                inline=True,
-                id="type-checklist-selection",
-            ),
-            dcc.Checklist(
-                options={"X": "X axis", "Y": "Y axis", "Z": "Z axis", "W": "W axis"},
-                value=["X", "Y", "Z", "W"],
-                inline=True,
-                id="axis-checklist-selection",
-            ),
-            dcc.Graph(id="graph-content"),
-            dcc.Interval(
-                id='interval-component',
-                interval=1000, # in milliseconds
-                n_intervals=0
-            ),
-        ]
+    mplcursors.cursor(hover=True)
+
+    bclear.on_clicked(onClickClear)
+
+    bpause.on_clicked(onClickPause)
+    bpause.label2 = axpause.text(
+        0.5, 0.5, "Resume", verticalalignment="center", horizontalalignment="center", transform=axpause.transAxes
     )
+    bpause.label2.set_visible(False)
 
-    app.run(port='8051')
+    plt.show()
+
+    # Ensure output directory is created
+    os.makedirs("arduino_output", exist_ok=True)
+
+    # Save dataframes to csv after plot is closed
+    for i in range(VECTOR_COUNT):
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        dfs[i].to_csv(os.path.join("arduino_output", f"arduino_data_{i}_{timestamp}.csv"))
 
 
 if __name__ == "__main__":
