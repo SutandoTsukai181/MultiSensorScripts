@@ -95,8 +95,8 @@ def update_graph_dropdown(dropdown_values, checklist_values, slider_range):
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python visualize_sensors_data.py <file>")
+    if len(sys.argv) < 2:
+        print("Usage: python visualize_sensors_data.py FILE [SENSORS_FILE]")
         sys.exit(1)
 
     global df, sensors_data_file
@@ -113,12 +113,37 @@ def main():
     df.index = df.index / 1000
     df.index.name = "1 SECOND"
 
+    sensors_figure = []
+    if len(sys.argv) == 3:
+        file2 = sys.argv[2]
+        df2 = pd.read_csv(file2)
+        df2.set_index(df2.columns[0], inplace=True)
+
+        df2.index.name = "1 SECOND"
+
+        # Sensors figure
+        sensor_fig = px.line(
+            df2,
+            title=file2.split(".")[0],
+            labels=dict(variable="Column Name", value="Value"),
+        )
+
+        sensor_fig.update_traces(mode="lines", hovertemplate="%{y}")
+        sensor_fig.update_layout(hovermode="x unified", xaxis_title="Time (s)")
+
+        sensors_figure = [
+            dcc.Graph(
+                    figure=sensor_fig,
+                    id="graph2-content",
+                ),
+        ]
+
     app = Dash(__name__, external_stylesheets=["https://codepen.io/chriddyp/pen/bWLwgP.css"])
 
     app.layout = html.Div(
         [
             dcc.Dropdown(
-                column_list, ["IMU RUA Quaternion", "IMU LUA Quaternion"], multi=True, id="dropdown-selection"
+                column_list, ["Acc LUA^",], multi=True, id="dropdown-selection"
             ),
             dcc.Checklist(
                 options={"X": "X axis", "Y": "Y axis", "Z": "Z axis", "W": "W axis"},
@@ -136,6 +161,7 @@ def main():
                 tooltip={"placement": "bottom", "always_visible": True},
                 id="my-range-slider",
             ),
+            *sensors_figure,
         ]
     )
 
