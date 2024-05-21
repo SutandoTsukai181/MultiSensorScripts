@@ -19,6 +19,13 @@ from bluepy import btle
 import simplepyble
 import msgpack
 
+DEVICES = [
+    '08:D1:F9:C7:14:DE', # ESP32 DevkitC v4 1 (Left arm)
+    '08:D1:F9:DF:D7:BA', # ESP32 DevkitC v4 2 (Right arm)
+    'CD:C8:D6:CF:45:50', # XIAO 1 (Left leg)
+    'D9:4D:33:22:7F:55', # XIAO 2 (Right leg)
+]
+
 def read_values(service3):
     sensor_val_char = service3.getCharacteristics("beb5483e-36e1-4688-b7f5-ea07361b26a8")[0]
     sensor_val = sensor_val_char.read()
@@ -92,76 +99,13 @@ def connect_simple(address):
       print(f'Could not find peripheral with address {address}')
       return None
    
-   print(f'Found peripheral {address}')
+   print(f'Found peripheral {p[0].identifier()}')
    p[0].connect()
    print(f'Successfully connected!')
 
+
    return p[0]
 
-
-
-#--------------------------------------------------------
-# CONNECT WITH BLUEPY
-# RIGHT ARM
-def data_1():
-    mac_adrs3 = '08:D1:F9:DF:D7:BA'
-    
-    print("Connecting..")
-    tp3_sense = btle.Peripheral(mac_adrs3,"random")
-    
-    print("Discovering Services..")
-    _=tp3_sense.services
-    tire3_sensing_service = tp3_sense.getServiceByUUID("4fafc201-1fb5-459e-8fcc-c5c9c331914b")
-    
-    print("Discovering characteristics..")
-    _= tire3_sensing_service.getCharacteristics()
-    
-    return tire3_sensing_service
-# LEFT ARM
-def data_2():
-    mac_adrs3 = '08:D1:F9:C7:14:DE'
-    
-    print("Connecting..")
-    tp3_sense = btle.Peripheral(mac_adrs3,"random")
-    
-    print("Discovering Services..")
-    _=tp3_sense.services
-    tire3_sensing_service = tp3_sense.getServiceByUUID("4fafc201-1fb5-459e-8fcc-c5c9c331914b")
-    
-    print("Discovering characteristics..")
-    _= tire3_sensing_service.getCharacteristics()
-    
-    return tire3_sensing_service
-# LEFT LEG
-def data_3():
-    mac_adrs3 = 'CD:C8:D6:CF:45:50'
-    
-    print("Connecting..")
-    tp3_sense = btle.Peripheral(mac_adrs3)
-    
-    print("Discovering Services..")
-    _=tp3_sense.services
-    tire3_sensing_service = tp3_sense.getServiceByUUID("4fafc201-1fb5-459e-8fcc-c5c9c331914b")
-    
-    print("Discovering characteristics..")
-    _= tire3_sensing_service.getCharacteristics()
-    
-    return tire3_sensing_service
-# RIGHT LEG
-def data_4():
-    mac_adrs3 = 'D9:4D:33:22:7F:55'
-    
-    print("Connecting..")
-    tp3_sense = btle.Peripheral(mac_adrs3,"random")
-    
-    print("Discovering Services..")
-    _=tp3_sense.services
-    tire3_sensing_service = tp3_sense.getServiceByUUID("4fafc201-1fb5-459e-8fcc-c5c9c331914b")
-    
-    print("Discovering characteristics..")
-    _= tire3_sensing_service.getCharacteristics()
-    
-    return tire3_sensing_service
 
 # Define a service like so.
 class AllTogether(Service):
@@ -175,7 +119,7 @@ class AllTogether(Service):
    @characteristic("beb5483e-36e1-4688-b7f5-ea07361b26a8", CharFlags.READ)
    def my_readonly_characteristic(self, options):
       # Characteristics need to return bytes.
-      return bytes(self._some_value, "utf-8")
+      return bytes(self._some_value, "utf-8") if not isinstance(self._some_value, bytes) else self._some_value
 
    # This is a write only characteristic.
    @characteristic("BEF1", CharFlags.WRITE)
@@ -236,46 +180,48 @@ async def main():
    await advert.register(bus, adapter)
 #    time.sleep(10)
    num=0
-   # d1 = data_1()
-   # d2 = data_2()
 
-   # d3 = data_3()
-   # d4 = data_4()
+   peripherals = []
+   for d in DEVICES:
+      peripherals.append(connect_simple(d))
 
-   p1 = connect_simple('08:D1:F9:C7:14:DE')
 
    while True:
-        # Update the heart rate.
-      #   gatt1_ESP.sendline("char-read-hnd 002a")
-      #   gatt1_ESP.expect("Characteristic value/descriptor: .*")
-      #   values1 = str(bytes.fromhex(gatt1_ESP.after.decode("utf-8")[32:-39]))[2:-1] #TODO change to msgpaack
-      #   print(f"Values1: {values1}")
-      #   service.update_value(values1)
-        
-      #   gatt2_ESP.sendline("char-read-hnd 002a")
-      #   gatt2_ESP.expect("Characteristic value/descriptor: .*")
-      #   values2 = str(bytes.fromhex(gatt2_ESP.after.decode("utf-8")[32:-39]))[2:-1] #TODO change to msgpaack
-      #   print(f"Values2: {values2}")
-      #   service.update_value(values2)
 
-      #   gatt3_NRF.sendline("char-read-hnd 000c") #TODO check for the correct handle value
-      #   gatt3_NRF.expect("Characteristic value/descriptor: .*")
-      #   values3 = str(bytes.fromhex(gatt3_NRF.after.decode("utf-8")[32:-39]))[2:-1] #TODO change to msgpaack
-      #   print(f"Values3: {values3}")
-      #   service.update_value(values3)
+      combined = dict()
+      for i in range(len(peripherals)):
+         p = peripherals[i]
 
-      #   gatt4_NRF.sendline("char-read-hnd 000c") #TODO check for the correct handle value
-      #   gatt4_NRF.expect("Characteristic value/descriptor: .*")
-      #   values4 = str(bytes.fromhex(gatt4_NRF.after.decode("utf-8")[32:-39]))[2:-1] #TODO change to msgpaack
-      #   print(f"Values4: {values4}")
+         if p is None:
+            continue
 
+         try:
+            contents = p.read(service_uuid, characteristic_uuid)
 
-      contents = p1.read(service_uuid, characteristic_uuid)
+            if len(contents) != 0:
+               print(f'\nMCU: {p.identifier()}')
 
-      if len(contents) != 0:
-         unpacked = msgpack.unpackb(contents)
-         
-         print(unpacked)
+               unpacked = msgpack.unpackb(contents)
+               
+               print(unpacked)
+               combined[p.identifier()] = unpacked
+         except RuntimeError as e:
+            if (str(e) == 'Peripheral is not connected.'):
+
+               # TODO: put delay and try/except
+               print(f'Reconnecting {p.identifier()}')
+
+               try:
+                  p.connect()
+               except Exception as e2:
+                  try:
+                     p = connect_simple(p.address())
+                     peripherals[i] = p
+                  except Exception as e3:
+                     print(e3)
+                  print(e2)
+         except Exception as e:
+               print(e)
 
       # value1 =  read_values(d1)
       # value2 =  read_values(d2)
@@ -286,7 +232,10 @@ async def main():
       # values = value1 + value2 + value3 + value4
       # value3 = "helloo"
 
-      # service.update_value(str(value1))
+      value = msgpack.packb(combined)
+
+      print(f"Combined length: {len(value)}")
+      service.update_value(value)
 
       # Handle dbus requests.
       await asyncio.sleep(0.5) 
