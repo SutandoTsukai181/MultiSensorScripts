@@ -125,30 +125,40 @@ class AllTogether(Service):
 service_uuid = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 characteristic_uuid = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
+import json
+import time
+import datetime
+
+data = []
+
+def save_file():
+    global data
+    fname = f'/home/raspiserver/Desktop/test_data/{datetime.datetime.now()}.json'
+    with open(fname, 'w') as f:
+        json.dump({'data': data}, f)
+    
+    print(f'Saved {fname}')
 
 # This needs running in an awaitable context.
 async def main():
+    global data
+    
     # Get the message bus.
     bus = await get_message_bus()
-
     # Create an instance of your service.
     service = AllTogether()
-
     # Register the service with the message bus.
     await service.register(bus)
-
     # An agent is required if you wish to handle pairing.
     agent = NoIoAgent()
     # This line needs superuser for this to work.
     await agent.register(bus)
-
     adapter = await Adapter.get_first(bus)
-
     my_service_ids = ["3206"]  # The services that we're advertising.
     my_appearance = 0x0340  # The appearance of my service.
     # See https://specificationrefs.bluetooth.com/assigned-values/Appearance%20Values.pdf
     my_timeout = (
-        600  # Advert should last 60 seconds before ending (assuming other local
+            600  # Advert should last 60 seconds before ending (assuming other local
     )
     # services aren't being advertised).
     advert = Advertisement("Raspi5School", my_service_ids, my_appearance, my_timeout)
@@ -159,6 +169,9 @@ async def main():
     for d in DEVICES:
         peripherals.append(connect_simple(d))
 
+    print(f'Connected to {len(peripherals)} peripherals')
+
+    count = 0
     while True:
         combined = dict()
         for i in range(len(peripherals)):
@@ -196,11 +209,24 @@ async def main():
 
         value = msgpack.packb(combined)
 
+        print('-------------------------------')
         print(f"Combined length: {len(value)}")
         service.update_value(value)
 
+        val = {}
+        val['t'] = time.time()
+        val['v'] = combined
+
+        data.append(val)
+        count += 1
+
+        if count >= 25:
+            count = 0
+            save_file()
+            data.clear()
+
         # Handle dbus requests.
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.2)
     # Wait for the service to disconnect.
     await bus.wait_for_disconnect()
 
