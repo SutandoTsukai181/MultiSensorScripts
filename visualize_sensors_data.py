@@ -77,7 +77,7 @@ def update_graph_dropdown(dropdown_values, checklist_values, slider_range):
             for col in df.columns
             if any([val in col for val in dropdown_values])
             and (
-                col.endswith(tuple(checklist_values))
+                col.lower().endswith(tuple([x.lower() for x in checklist_values]))
                 or col.endswith(tuple(["Quaternion" + str(i + 1) for i in checklist_values_quat]))
             )
         ]
@@ -112,6 +112,9 @@ def main():
     # Divide by 1000 to convert from milliseconds to seconds
     df.index = df.index / 1000
     df.index.name = "1 SECOND"
+
+    # Convert all NaN values to None
+    df = df.where(pd.notnull(df), None)
 
     sensors_figure = []
     if len(sys.argv) == 3:
