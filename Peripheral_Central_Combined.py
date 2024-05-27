@@ -1,4 +1,8 @@
 import asyncio
+import threading
+import json
+import time
+import datetime
 
 from bluez_peripheral.gatt.service import Service
 from bluez_peripheral.gatt.characteristic import (
@@ -14,12 +18,38 @@ from bluez_peripheral.agent import NoIoAgent
 import simplepyble
 import msgpack
 
+RECONNECTION_DELAY = 1
+
 DEVICES = [
     "08:D1:F9:C7:14:DE",  # ESP32 DevkitC v4 1 (Left arm)
     "08:D1:F9:DF:D7:BA",  # ESP32 DevkitC v4 2 (Right arm)
     "CD:C8:D6:CF:45:50",  # XIAO 1 (Left leg)
     "D9:4D:33:22:7F:55",  # XIAO 2 (Right leg)
 ]
+
+def do_every(period, f, *args):
+    def g_tick():
+        t = time.time()
+        while True:
+            t += period
+            yield max(t - time.time(), 0)
+
+    g = g_tick()
+    while True:
+        time.sleep(next(g))
+        f(*args)
+
+
+def start_thread(target, *args, **kwargs):
+    t = threading.Thread(target=target, args=args, kwargs=kwargs)
+    t.daemon = True
+    t.start()
+
+    return t
+
+
+def start_scheduled_thread(interval, target, *args):
+    return start_thread(do_every, interval, target, *args)
 
 adapter = None
 
@@ -45,7 +75,7 @@ def get_adapter():
     return adapter
 
 
-def connect_simple(address):
+def connect_simple(address, peripherals=None):
     global adapter
     if adapter is None:
         adapter = get_adapter()
@@ -53,14 +83,13 @@ def connect_simple(address):
     adapter.set_callback_on_scan_start(lambda: print("Scan started."))
     adapter.set_callback_on_scan_stop(lambda: print("Scan complete."))
     adapter.set_callback_on_scan_found(
-        lambda peripheral: print(
-            f"Found {peripheral.identifier()} [{peripheral.address()}]"
-        )
+        lambda peripheral: print(f"Found {peripheral.identifier()} [{peripheral.address()}]")
     )
 
-    # Scan for 1.5 seconds
-    adapter.scan_for(1500)
-    peripherals = adapter.scan_get_results()
+    if peripherals is None:
+        # Scan for 2 seconds
+        adapter.scan_for(2000)
+        peripherals = adapter.scan_get_results()
 
     p = [per for per in peripherals if per.address() == address]
 
@@ -87,11 +116,7 @@ class AllTogether(Service):
     @characteristic("beb5483e-36e1-4688-b7f5-ea07361b26a8", CharFlags.READ)
     def my_readonly_characteristic(self, options):
         # Characteristics need to return bytes.
-        return (
-            bytes(self._some_value, "utf-8")
-            if not isinstance(self._some_value, bytes)
-            else self._some_value
-        )
+        return bytes(self._some_value, "utf-8") if not isinstance(self._some_value, bytes) else self._some_value
 
     # This is a write only characteristic.
     @characteristic("BEF1", CharFlags.WRITE)
@@ -125,24 +150,22 @@ class AllTogether(Service):
 service_uuid = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 characteristic_uuid = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
-import json
-import time
-import datetime
-
 data = []
+
 
 def save_file():
     global data
-    fname = f'/home/raspiserver/Desktop/test_data/{datetime.datetime.now()}.json'
-    with open(fname, 'w') as f:
-        json.dump({'data': data}, f)
-    
-    print(f'Saved {fname}')
+    fname = f"/home/raspiserver/Desktop/test_data/{datetime.datetime.now()}.json"
+    with open(fname, "w") as f:
+        json.dump({"data": data}, f)
+
+    print(f"Saved {fname}")
+
 
 # This needs running in an awaitable context.
 async def main():
     global data
-    
+
     # Get the message bus.
     bus = await get_message_bus()
     # Create an instance of your service.
@@ -157,24 +180,58 @@ async def main():
     my_service_ids = ["3206"]  # The services that we're advertising.
     my_appearance = 0x0340  # The appearance of my service.
     # See https://specificationrefs.bluetooth.com/assigned-values/Appearance%20Values.pdf
-    my_timeout = (
-            600  # Advert should last 60 seconds before ending (assuming other local
-    )
+    my_timeout = 600  # Advert should last 60 seconds before ending (assuming other local
     # services aren't being advertised).
     advert = Advertisement("Raspi5School", my_service_ids, my_appearance, my_timeout)
     await advert.register(bus, adapter)
     #    time.sleep(10)
 
     peripherals = []
+    disconnected_indices = []
+
+    def reconnect_peripheral(i):
+        p = peripherals[i]
+        func_name = f'[Reconnecting {p.identifier()}] '
+
+        while True:
+            try:
+                p.connect()
+                break
+            except Exception as e2:
+                print(func_name + f'Failed reconnecting: {e2}')
+
+                try:
+                    p = connect_simple(p.address())
+                    
+                    if p:
+                        peripherals[i] = p
+                        break
+                    
+                    print(func_name + f'Could not find address {p.address()}')
+                except Exception as e3:
+                    print(func_name + f'Failed rescanning: {e3}')
+                    print(e3)
+            
+            # Wait before trying again
+            time.sleep(RECONNECTION_DELAY)
+
+        if i in disconnected_indices:
+            disconnected_indices.remove(i)
+
+    adapter.scan_for(2000)
+    scanned = adapter.scan_get_results()
     for d in DEVICES:
-        peripherals.append(connect_simple(d))
+        peripherals.append(connect_simple(d), scanned)
 
-    print(f'Connected to {len(peripherals)} peripherals')
+    print(f"Connected to {len(peripherals)} peripherals")
 
-    count = 0
+    # count = 0
     while True:
         combined = dict()
         for i in range(len(peripherals)):
+            if i in disconnected_indices:
+                continue
+
             p = peripherals[i]
 
             if p is None:
@@ -192,38 +249,34 @@ async def main():
                     combined[p.identifier()] = unpacked
             except RuntimeError as e:
                 if str(e) == "Peripheral is not connected.":
-                    # TODO: put delay and try/except
                     print(f"Reconnecting {p.identifier()}")
+                    
+                    if i not in disconnected_indices:
+                        disconnected_indices.append(i)
 
-                    try:
-                        p.connect()
-                    except Exception as e2:
-                        try:
-                            p = connect_simple(p.address())
-                            peripherals[i] = p
-                        except Exception as e3:
-                            print(e3)
-                        print(e2)
+                    # This will keep reconnecting until it's successful
+                    start_thread(reconnect_peripheral, i)
             except Exception as e:
                 print(e)
 
         value = msgpack.packb(combined)
 
-        print('-------------------------------')
+        print("-------------------------------")
         print(f"Combined length: {len(value)}")
         service.update_value(value)
 
         val = {}
-        val['t'] = time.time()
-        val['v'] = combined
+        val["t"] = time.time()
+        val["v"] = combined
 
         data.append(val)
-        count += 1
+        
+        # count += 1
 
-        if count >= 25:
-            count = 0
-            save_file()
-            data.clear()
+        # if count >= 25:
+        #     count = 0
+        #     save_file()
+        #     data.clear()
 
         # Handle dbus requests.
         await asyncio.sleep(0.2)
