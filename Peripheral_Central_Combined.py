@@ -260,7 +260,7 @@ async def main():
     for d, dn in zip(DEVICES, DEVICE_NAMES):
         p = connect_simple(d, peripherals=scanned)
         peripherals.append(p)
-        peripheral_names.append(p.identifier() if p else dn)
+        peripheral_names.append(dn)
         peripherals_status.append(NodeStatus.CONNECTED if p else NodeStatus.UNAVAILABLE)
 
     print(f"Connected to {len(peripherals)} peripherals")
