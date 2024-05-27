@@ -3,7 +3,7 @@ import threading
 import json
 import time
 import datetime
-from enum import Enum
+from enum import IntEnum
 
 from bluez_peripheral.gatt.service import Service
 from bluez_peripheral.gatt.characteristic import (
@@ -40,7 +40,7 @@ DEVICE_NAMES = [
 ]
 
 
-class NodeStatus(Enum):
+class NodeStatus(IntEnum):
     UNAVAILABLE = 0  # Device was not found at the start
     CONNECTED = 1
     DISCONNECTED = 2
@@ -59,9 +59,15 @@ def do_every(period, f, *args):
         time.sleep(next(g))
         f(*args)
 
+def start_async_thread(target, *args):
+    t = threading.Thread(target=asyncio.run, args=(target(*args),))
+    t.daemon = True
+    t.start()
 
-def start_thread(target, *args, **kwargs):
-    t = threading.Thread(target=target, args=args, kwargs=kwargs)
+    return t
+
+def start_thread(target, *args):
+    t = threading.Thread(target=target, args=args)
     t.daemon = True
     t.start()
 
@@ -100,12 +106,6 @@ def connect_simple(address, scan_time=2000, peripherals=None):
     global adapter
     if adapter is None:
         adapter = get_adapter()
-
-    adapter.set_callback_on_scan_start(lambda: print("Scan started."))
-    adapter.set_callback_on_scan_stop(lambda: print("Scan complete."))
-    adapter.set_callback_on_scan_found(
-        lambda peripheral: print(f"Found {peripheral.identifier()} [{peripheral.address()}]")
-    )
 
     if peripherals is None:
         # Scan for 2 seconds by default
@@ -182,7 +182,7 @@ def save_file():
 
 # This needs running in an awaitable context.
 async def main():
-    global data
+    global data, adapter
 
     # Get the message bus.
     bus = await get_message_bus()
@@ -194,14 +194,14 @@ async def main():
     agent = NoIoAgent()
     # This line needs superuser for this to work.
     await agent.register(bus)
-    adapter = await Adapter.get_first(bus)
+    bluez_adapter = await Adapter.get_first(bus)
     my_service_ids = ["3206"]  # The services that we're advertising.
     my_appearance = 0x0340  # The appearance of my service.
     # See https://specificationrefs.bluetooth.com/assigned-values/Appearance%20Values.pdf
     my_timeout = 600  # Advert should last 60 seconds before ending (assuming other local
     # services aren't being advertised).
     advert = Advertisement("Raspi5School", my_service_ids, my_appearance, my_timeout)
-    await advert.register(bus, adapter)
+    await advert.register(bus, bluez_adapter)
     #    time.sleep(10)
 
     peripherals = []
@@ -210,7 +210,7 @@ async def main():
     peripheral_threads = []
 
     # Reconnection code
-    def reconnect_peripheral(i):
+    async def reconnect_peripheral(i):
         p = peripherals[i]
         func_name = f"[Reconnecting {p.identifier()}] "
 
@@ -226,22 +226,32 @@ async def main():
                 print(func_name + f"Failed reconnecting: {e2}")
 
                 try:
-                    p = connect_simple(p.address(), scan_time=1000)
+                    p = connect_simple(DEVICES[i], scan_time=1000)
 
                     if p:
                         peripherals[i] = p
                         break
 
-                    print(func_name + f"Could not find address {p.address()}")
+                    print(func_name + f"Could not find address {DEVICES[i]}")
                 except Exception as e3:
                     print(func_name + f"Failed rescanning: {e3}")
                     print(e3)
 
             # Wait before trying again
             peripherals_status[i] = NodeStatus.DISCONNECTED
-            time.sleep(RECONNECTION_DELAY)
+            await asyncio.sleep(RECONNECTION_DELAY)
 
         peripherals_status[i] = NodeStatus.CONNECTED
+
+    # Initialize adapter
+    if adapter is None:
+        adapter = get_adapter()
+
+    adapter.set_callback_on_scan_start(lambda: print("Scan started."))
+    adapter.set_callback_on_scan_stop(lambda: print("Scan complete."))
+    adapter.set_callback_on_scan_found(
+        lambda peripheral: print(f"Found {peripheral.identifier()} [{peripheral.address()}]")
+    )
 
     # Scan once, connect to all peripherals
     adapter.scan_for(2000)
@@ -258,14 +268,14 @@ async def main():
     combined = {
         pn: {
             "data": {},
-            "status": ps,
+            "status": int(ps),
         }
         for pn, ps in zip(peripheral_names, peripherals_status)
     }
 
     def read_peripheral(i):
         # Update status
-        combined[peripheral_names[i]]["status"] = peripherals_status[i]
+        combined[peripheral_names[i]]["status"] = int(peripherals_status[i])
 
         if peripherals_status[i] != NodeStatus.CONNECTED:
             return
@@ -281,7 +291,7 @@ async def main():
             if len(contents) != 0:
                 unpacked = msgpack.unpackb(contents)
 
-                print("\n" + func_name + f"\n{unpacked}")
+                # print("\n" + func_name + f"\n{unpacked}")
 
                 # Update data
                 combined[peripheral_names[i]]["data"] = unpacked
@@ -291,11 +301,8 @@ async def main():
 
                 print(func_name + f"DISCONNECTED")
 
-                if i not in peripherals_status:
-                    peripherals_status.append(i)
-
                 # This will keep reconnecting until it's successful
-                start_thread(reconnect_peripheral, i)
+                start_async_thread(reconnect_peripheral, i)
         except Exception as e:
             print(e)
 
@@ -306,6 +313,7 @@ async def main():
 
         print("\n----------------------------------")
         print(f"Combined length: {len(value)}\n")
+        print(combined)
         service.update_value(value)
 
     for i in range(len(peripherals)):
@@ -316,13 +324,17 @@ async def main():
         # t0.150: read 3
         # t0.200: send combined, read 0 again
         peripheral_threads.append(start_scheduled_thread(PERIPHERAL_READ_DELAY, read_peripheral, i))
-        time.sleep(0.050)
+        await asyncio.sleep(0.050)
 
     # start_scheduled_thread(PERIPHERAL_READ_DELAY, send_combined)
 
     while True:
+        # try:
         send_combined()
-        time.sleep(PERIPHERAL_READ_DELAY)
+        await asyncio.sleep(PERIPHERAL_READ_DELAY)
+        # except KeyboardInterrupt:
+        #     for t in peripheral_threads:
+        #         t.join()
 
     # while True:
     #     # val = {}
