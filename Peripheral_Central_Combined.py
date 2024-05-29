@@ -177,7 +177,7 @@ def save_file():
     with open(fname, "w") as f:
         json.dump({"data": data}, f)
 
-    print(f"Saved {fname}")
+    print(f"\n************** Saved {fname} **************\n")
 
 
 # This needs running in an awaitable context.
@@ -328,20 +328,32 @@ async def main():
 
     # start_scheduled_thread(PERIPHERAL_READ_DELAY, send_combined)
 
+    count = 0
+
     while True:
-        # try:
-        send_combined()
+        combined["time"] = time.time()
+
+        print("\n----------------------------------")
+        print(combined)
+
+        data.append(combined)
+
+        count += 1
+
+        # Save every 5 seconds
+        if count >= 25:
+            count = 0
+            save_file()
+            data.clear()
+
         await asyncio.sleep(PERIPHERAL_READ_DELAY)
-        # except KeyboardInterrupt:
-        #     for t in peripheral_threads:
-        #         t.join()
 
-    # while True:
-    #     # val = {}
-    #     # val["t"] = time.time()
-    #     # val["v"] = combined
-
-    #     # data.append(val)
+        # # try:
+        # send_combined()
+        # await asyncio.sleep(PERIPHERAL_READ_DELAY)
+        # # except KeyboardInterrupt:
+        # #     for t in peripheral_threads:
+        # #         t.join()
 
     #     # Handle dbus requests.
     #     await asyncio.sleep(0.2)
