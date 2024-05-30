@@ -4,6 +4,7 @@ import json
 import time
 import datetime
 from enum import IntEnum
+from copy import deepcopy
 
 from bluez_peripheral.gatt.service import Service
 from bluez_peripheral.gatt.characteristic import (
@@ -336,7 +337,7 @@ async def main():
         print("\n----------------------------------")
         print(combined)
 
-        data.append(combined)
+        data.append(deepcopy(combined))
 
         count += 1
 
