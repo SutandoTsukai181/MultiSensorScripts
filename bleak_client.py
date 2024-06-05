@@ -56,6 +56,7 @@ def disconnect_client(index: int, client: BleakClient):
 
 CONNECTION_TIMEOUT = 8
 
+
 async def add_client(index: int, device: BLEDevice):
     client = BleakClient(
         device, disconnected_callback=lambda bc: disconnect_client(index, bc)
@@ -67,6 +68,13 @@ async def add_client(index: int, device: BLEDevice):
             await client.connect()
 
         logger.info(f"Successfully connected to {DEVICE_NAMES[index]}")
+
+        # Force discover the services (otherwise characteristic might not be found)
+        services = await client.get_services()
+        # for s in services:
+        #     print(f'\nService: {s.uuid}')
+        #     for c in s.characteristics:
+        #         print(f'Characteristic: {c.uuid}')
 
         # Handle notifications in a separate thread for each client
         await client.start_notify(
@@ -89,49 +97,50 @@ async def add_client(index: int, device: BLEDevice):
 # Thresholds in seconds
 MAX_NOTIFICATION_INTERVAL = 0.150
 DATA_VALIDITY_THRESHOLD = 0.800
-SCAN_TIMEOUT = 2
-SCAN_CHECK_INTERVAL = 0.2
+SCAN_TIMEOUT = 1.5
+SCAN_CHECK_INTERVAL = 0.5
+
+# Global flag to avoid creating multiple scanners
+is_scanning = False
 
 
 async def check_and_reconnect():
+    global is_scanning
+
     indices = [i for i in range(len(bleak_clients)) if bleak_clients[i] is None]
     addresses = [DEVICES[i] for i in indices]
 
     if len(indices) == 0:
         return
-    
+
     logger.info(f"Scanning for {[DEVICE_NAMES[i] for i in indices]}...")
-    
+
     scanned_devices = dict()
-    
-    try:
-        async with asyncio.timeout(SCAN_TIMEOUT):
-            async with BleakScanner() as scanner:
+
+    async with BleakScanner() as scanner:
+        try:
+            is_scanning = True
+            async with asyncio.timeout(SCAN_TIMEOUT):
                 while True:
                     for bd in scanner.discovered_devices:
                         print((bd.name, bd.address))
                         if bd.address in addresses:
                             scanned_devices[bd.address] = bd
 
+                            # Stop once we find all addresses
+                            if len(scanned_devices) == len(addresses):
+                                break
+
                     await asyncio.sleep(SCAN_CHECK_INTERVAL)
-    except TimeoutError:
-        pass
-        
+        except TimeoutError:
+            pass
+
+    is_scanning = False
 
     for bd in scanned_devices.values():
         await asyncio.sleep(1)  # Sleep for a while before connecting
         logger.info(f"Connecting to {bd.name} at {bd.address}")
         await add_client(indices[addresses.index(bd.address)], bd)
-    
-    # devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
-    
-    # print('Scanned devices:')
-    # print([(bd.name, bd.address) for bd in devices])
-    # for bd in devices:
-    #     if bd.address in addresses:
-    #         await asyncio.sleep(1)  # Sleep for a while before connecting
-    #         logger.info(f"Connecting to {bd.name} at {bd.address}")
-    #         await add_client(indices[addresses.index(bd.address)], bd)
 
 
 def combine_data_and_send():
@@ -193,7 +202,11 @@ def combine_data_and_send():
 async def main():
     while True:
         combine_data_and_send()
-        await check_and_reconnect()
+
+        # The script will crash on Linux if we create two instances of BleakScanner
+        if not is_scanning:
+            await check_and_reconnect()
+
         await asyncio.sleep(1)  # Sleep for a while before checking again
 
 
@@ -206,7 +219,7 @@ if __name__ == "__main__":
 
     try:
         asyncio.run(main())
-    except Exception as e:
+    except BaseException as e:
         for i, client in enumerate(bleak_clients):
             if client is not None:
                 disconnect_client(i, client)
