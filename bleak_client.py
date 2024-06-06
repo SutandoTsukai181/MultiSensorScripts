@@ -4,6 +4,8 @@ import concurrent.futures
 from queue import Queue
 from typing import Optional
 import time
+import datetime
+import json
 
 import msgpack
 
@@ -14,10 +16,10 @@ SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
 DEVICES = [
-    "08:D1:F9:C7:14:DE",  # ESP32 DevkitC v4 1 (Left arm)
-    "08:D1:F9:DF:D7:BA",  # ESP32 DevkitC v4 2 (Right arm)
+    # "08:D1:F9:C7:14:DE",  # ESP32 DevkitC v4 1 (Left arm)
+    # "08:D1:F9:DF:D7:BA",  # ESP32 DevkitC v4 2 (Right arm)
     # "CD:C8:D6:CF:45:50",  # XIAO 1 (Left leg)
-    # "D9:4D:33:22:7F:55",  # XIAO 2 (Right leg)
+    "D9:4D:33:22:7F:55",  # XIAO 2 (Right leg)
 ]
 
 DEVICE_NAMES = [
@@ -55,6 +57,7 @@ def disconnect_client(index: int, client: BleakClient):
 
 
 CONNECTION_TIMEOUT = 8
+
 
 async def add_client(index: int, device: BLEDevice):
     client = BleakClient(
@@ -99,11 +102,11 @@ async def check_and_reconnect():
 
     if len(indices) == 0:
         return
-    
+
     logger.info(f"Scanning for {[DEVICE_NAMES[i] for i in indices]}...")
-    
+
     scanned_devices = dict()
-    
+
     try:
         async with asyncio.timeout(SCAN_TIMEOUT):
             async with BleakScanner() as scanner:
@@ -116,15 +119,14 @@ async def check_and_reconnect():
                     await asyncio.sleep(SCAN_CHECK_INTERVAL)
     except TimeoutError:
         pass
-        
 
     for bd in scanned_devices.values():
         await asyncio.sleep(1)  # Sleep for a while before connecting
         logger.info(f"Connecting to {bd.name} at {bd.address}")
         await add_client(indices[addresses.index(bd.address)], bd)
-    
+
     # devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
-    
+
     # print('Scanned devices:')
     # print([(bd.name, bd.address) for bd in devices])
     # for bd in devices:
@@ -134,7 +136,7 @@ async def check_and_reconnect():
     #         await add_client(indices[addresses.index(bd.address)], bd)
 
 
-def combine_data_and_send():
+def combine_data_and_send() -> Optional[dict]:
     while True:
         # Get the latest notification from each queue
         latest_notifications = [
@@ -156,6 +158,8 @@ def combine_data_and_send():
             last_i = 0
             try:
                 combined_data = dict()
+                combined_data["time"] = time.time()
+
                 for i, n in enumerate(latest_notifications):
                     last_i = i
                     combined_data[DEVICE_NAMES[i]] = msgpack.unpackb(n[1])
@@ -163,13 +167,13 @@ def combine_data_and_send():
                 # Send combined data to server Pi
                 logger.info(f"Combined data: {combined_data}")
 
-                combined_data_packed = msgpack.packb(combined_data)
+                # combined_data_packed = msgpack.packb(combined_data)
 
                 # Remove the notifications from the queues
                 for q in notification_queues:
                     q.get()
 
-                return
+                return combined_data
             except Exception as e:
                 logger.error(f"Error unpacking data from {DEVICE_NAMES[last_i]}: {e}")
                 return
@@ -190,9 +194,31 @@ def combine_data_and_send():
         max_queue.get()
 
 
+def save_file():
+    global data
+    fname = f"/home/raspiserver/Desktop/test_data_06_06/{datetime.datetime.now()}.json"
+    with open(fname, "w") as f:
+        json.dump({"data": data}, f)
+
+    print(f"\n************** Saved {fname} **************\n")
+
+
 async def main():
+    count = 0
+    data = []
+
     while True:
-        combine_data_and_send()
+        combined_data = combine_data_and_send()
+
+        data.append(combined_data)
+        count += 1
+
+        # Save every 5 items or 10 seconds
+        if len(data) >= 5 or (count >= 10 and len(data) > 0):
+            count = 0
+            save_file()
+            data.clear()
+
         await check_and_reconnect()
         await asyncio.sleep(1)  # Sleep for a while before checking again
 
@@ -206,7 +232,7 @@ if __name__ == "__main__":
 
     try:
         asyncio.run(main())
-    except Exception as e:
+    except BaseException as e:
         for i, client in enumerate(bleak_clients):
             if client is not None:
                 disconnect_client(i, client)
