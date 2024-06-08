@@ -16,15 +16,15 @@ SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
 DEVICES = [
-    # "08:D1:F9:C7:14:DE",  # ESP32 DevkitC v4 1 (Left arm)
-    # "08:D1:F9:DF:D7:BA",  # ESP32 DevkitC v4 2 (Right arm)
+    "08:D1:F9:C7:14:DE",  # ESP32 DevkitC v4 1 (Left arm)
+    "08:D1:F9:DF:D7:BA",  # ESP32 DevkitC v4 2 (Right arm)
     "CD:C8:D6:CF:45:50",  # XIAO 1 (Left leg)
     "D9:4D:33:22:7F:55",  # XIAO 2 (Right leg)
 ]
 
 DEVICE_NAMES = [
-    # "LEFT_ARM",
-    # "RIGHT_ARM",
+    "LEFT_ARM",
+    "RIGHT_ARM",
     "LEFT_LEG",
     "RIGHT_LEG",
 ]
@@ -151,6 +151,12 @@ async def add_client(index: int, device: BLEDevice):
         return
 
 
+def disconnect_all():
+    for i, client in enumerate(bleak_clients):
+        if client is not None:
+            disconnect_client(i, client)
+
+
 # Scan parameters
 SCAN_TIMEOUT = 1.5
 SCAN_CHECK_INTERVAL = 0.5
@@ -202,8 +208,13 @@ async def check_and_reconnect():
 MAIN_LOOP_INTERVAL = 0.090
 MAX_MCU_TIME_DIFFERENCE = 0.150
 
+MAX_CONSECUTIVE_FAIL = 5
+consecutive_empty_packet_count = 0
+
 
 def combine_data_and_send() -> Optional[dict]:
+    global consecutive_empty_packet_count
+
     while True:
         # Get the latest notification from each queue
         latest_notifications: list[Optional[tuple[float, bytearray]]] = [
@@ -212,7 +223,17 @@ def combine_data_and_send() -> Optional[dict]:
 
         if any(n is None for n in latest_notifications):
             logger.warning("Skipping combined packet due to empty queues")
+            consecutive_empty_packet_count += 1
+
+            if consecutive_empty_packet_count > MAX_CONSECUTIVE_FAIL:
+                consecutive_empty_packet_count = 0
+
+                # If all devices appear to be connected, disconnect all of them to force scanning
+                if not any([bc for bc in bleak_clients if bc is None]):
+                    disconnect_all()
             return
+
+        consecutive_empty_packet_count = 0
 
         # Calculate the time difference between the latest notifications
         time_diff = max(n[0] for n in latest_notifications) - min(
@@ -280,8 +301,8 @@ async def main():
         if count % 10 == 0:
             if combined_data:
                 logger.info(f"Combined data: {combined_data}\n\n")
+                data.append(combined_data)
 
-        data.append(combined_data)
         count += 1
 
         # Save every 10 items or 20 iterations
@@ -296,12 +317,6 @@ async def main():
 
         # Sleep for a while before checking again
         await asyncio.sleep(MAIN_LOOP_INTERVAL)
-
-
-def disconnect_all():
-    for i, client in enumerate(bleak_clients):
-        if client is not None:
-            disconnect_client(i, client)
 
 
 if __name__ == "__main__":
