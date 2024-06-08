@@ -4,6 +4,7 @@ import datetime
 import json
 import logging
 import time
+from collections import deque
 from typing import Optional
 
 import colorlog
@@ -29,59 +30,59 @@ DEVICE_NAMES = [
 ]
 
 
-class ListQueue:
-    def __init__(self, max_size=20):
-        self.queue = []
-        self.max_size = max_size
+class TimedQueue:
+    def __init__(self, time_threshold):
+        self.threshold = time_threshold
+        self.queue = deque()
 
-    def put(self, item):
-        self.queue.append(item)
-        if len(self.queue) > self.max_size:
-            self.queue.pop(0)
+    def put(self, value):
+        now = time.time()
+        self.queue.append((now, value))
+        self.discard_old_values(now)
+
+    def discard_old_values(self, now=None):
+        if now is None:
+            now = time.time()
+
+        cutoff_time = now - self.threshold
+        try:
+            while self.queue[0][0] < cutoff_time:
+                # Remove older values from the queue
+                self.queue.popleft()
+        except IndexError:
+            pass
 
     def get(self):
-        return self.queue.pop(0)
+        # User should check for empty/qsize before calling this
+        return self.queue.popleft()
 
     def get_front(self):
-        return self.queue.pop(-1)
+        # User should check for empty/qsize before calling this
+        return self.queue.pop()
 
     def empty(self):
+        self.discard_old_values()
         return len(self.queue) == 0
 
     def qsize(self):
+        self.discard_old_values()
         return len(self.queue)
 
     def clear(self):
         self.queue.clear()
 
-    def truncate(self, size):
-        self.queue = self.queue[-size:]
 
-
-MAX_QUEUE_SIZE = 20
-TRUNCATED_QUEUE_SIZE = 5
+DATA_VALIDITY_THRESHOLD = 0.300
 
 bleak_clients: list[Optional[BleakClient]] = [None] * len(DEVICES)
 
-notification_queues = [ListQueue(MAX_QUEUE_SIZE) for _ in DEVICES]
+notification_queues = [TimedQueue(DATA_VALIDITY_THRESHOLD) for _ in DEVICES]
 
 # Setup logging
 LOG_FORMAT = "%(log_color)s%(asctime)-15s %(name)-8s %(levelname)s: %(message)s"
-# LOG_FORMAT = "%(log_color)s%(levelname)s:%(name)s:%(message)s"
 
 handler = colorlog.StreamHandler()
-handler.setFormatter(
-    colorlog.ColoredFormatter(
-        LOG_FORMAT,
-        log_colors={
-            "DEBUG": "cyan",
-            "INFO": "green",
-            "WARNING": "yellow",
-            "ERROR": "red",
-            "CRITICAL": "red,bg_white",
-        },
-    )
-)
+handler.setFormatter(colorlog.ColoredFormatter(LOG_FORMAT))
 
 logger = colorlog.getLogger(__name__)
 logger.addHandler(handler)
@@ -93,7 +94,7 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 def handle_notification(
     index: int, characteristic: BleakGATTCharacteristic, data: bytearray
 ):
-    notification_queues[index].put((time.time(), data))
+    notification_queues[index].put(data)
 
     # logger.info(f"Notified by {DEVICE_NAMES[index]}: {data.hex()}")
     # logger.info(f"Notified by {DEVICE_NAMES[index]}. Queue size: {notification_queues[index].qsize()}")
@@ -150,10 +151,7 @@ async def add_client(index: int, device: BLEDevice):
         return
 
 
-# Thresholds in seconds
-MAIN_LOOP_INTERVAL = 1
-MAX_NOTIFICATION_INTERVAL = 0.150
-DATA_VALIDITY_THRESHOLD = 0.800
+# Scan parameters
 SCAN_TIMEOUT = 1.5
 SCAN_CHECK_INTERVAL = 0.5
 
@@ -200,11 +198,16 @@ async def check_and_reconnect():
         await add_client(indices[addresses.index(bd.address)], bd)
 
 
+# Intervals in seconds
+MAIN_LOOP_INTERVAL = 0.090
+MAX_MCU_TIME_DIFFERENCE = 0.150
+
+
 def combine_data_and_send() -> Optional[dict]:
     while True:
         # Get the latest notification from each queue
         latest_notifications: list[Optional[tuple[float, bytearray]]] = [
-            q.queue[-1] if not q.empty() else None for q in notification_queues
+            q.get() if not q.empty() else None for q in notification_queues
         ]
 
         if any(n is None for n in latest_notifications):
@@ -216,8 +219,23 @@ def combine_data_and_send() -> Optional[dict]:
             n[0] for n in latest_notifications
         )
 
-        # While the time difference is greater than the threshold, use older values from the queue with the latest data
-        if time_diff <= MAX_NOTIFICATION_INTERVAL:
+        # While the time difference is greater than the threshold, drop older values from the queue with the oldest
+        if time_diff > MAX_MCU_TIME_DIFFERENCE:
+            # logger.warning(f"Skipping oldest packet due to time difference between MCUs ({int(time_diff * 1000)}ms)")
+
+            # Find the queue with the oldest data
+            min_queue = notification_queues[
+                latest_notifications.index(
+                    min(latest_notifications, key=lambda n: n[0])
+                )
+            ]
+
+            # Remove the oldest notification
+            if not min_queue.empty():
+                min_queue.get()
+
+            continue
+        else:
             # Combine the data from the notifications
             last_i = 0
             try:
@@ -230,14 +248,7 @@ def combine_data_and_send() -> Optional[dict]:
                     # combined_data[DEVICE_NAMES[i]] = json.loads(n[1].decode())
 
                 # Send combined data to server Pi
-                logger.info(f"Combined data: {combined_data}\n\n")
-
                 # combined_data_packed = msgpack.packb(combined_data)
-
-                # Remove older notifications from the queues
-                for q in notification_queues:
-                    if not q.empty():
-                        q.truncate(TRUNCATED_QUEUE_SIZE)
 
                 return combined_data
             except Exception as e:
@@ -246,36 +257,18 @@ def combine_data_and_send() -> Optional[dict]:
                 # print(f'Received data:\n{latest_notifications[last_i][1].decode()}')
                 return
 
-        # Find the queue with the latest data
-        max_queue = notification_queues[
-            latest_notifications.index(max(latest_notifications, key=lambda n: n[0]))
-        ]
-
-        # If the current time minus the max is larger than a the data validity threshold, break the loop
-        time_diff = time.time() - max_queue.queue[-1][0]
-        if time_diff > DATA_VALIDITY_THRESHOLD:
-            logger.warning(
-                f"Skipping combined packet due to data being too old ({int(time_diff * 1000)}ms)"
-            )
-
-            # Empty all of the queues since all data is old now
-            for q in notification_queues:
-                if not q.empty():
-                    q.clear()
-
-            return
-
-        # Remove the latest notification from the queue with the latest data
-        max_queue.get_front()
-
 
 def save_file():
     global data
     fname = f"/home/raspiserver/Desktop/test_data_06_06/{datetime.datetime.now()}.json"
-    with open(fname, "w") as f:
-        json.dump({"data": data}, f)
 
-    logger.info(f"************** Saved {fname} **************\n")
+    try:
+        with open(fname, "w") as f:
+            json.dump({"data": data}, f)
+
+        logger.info(f"************** Saved {fname} **************\n")
+    except Exception as e:
+        logger.error(f'Error saving file "{fname}": {e}')
 
 
 async def main():
@@ -285,11 +278,15 @@ async def main():
     while True:
         combined_data = combine_data_and_send()
 
+        if count % 10 == 0:
+            if combined_data:
+                logger.info(f"Combined data: {combined_data}\n\n")
+
         data.append(combined_data)
         count += 1
 
-        # Save every 5 items or 10 iterations
-        if len(data) >= 5 or (count >= 10 and len(data) > 0):
+        # Save every 10 items or 20 iterations
+        if len(data) >= 10 or (count >= 20 and len(data) > 0):
             count = 0
             save_file()
             data.clear()
@@ -299,7 +296,7 @@ async def main():
             await check_and_reconnect()
 
         # Sleep for a while before checking again
-        await asyncio.sleep(MAIN_LOOP_INTERVAL)  
+        await asyncio.sleep(MAIN_LOOP_INTERVAL)
 
 
 def disconnect_all():
