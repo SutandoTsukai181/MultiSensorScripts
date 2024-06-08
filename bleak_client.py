@@ -16,15 +16,15 @@ SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
 DEVICES = [
-    "08:D1:F9:C7:14:DE",  # ESP32 DevkitC v4 1 (Left arm)
-    "08:D1:F9:DF:D7:BA",  # ESP32 DevkitC v4 2 (Right arm)
+    # "08:D1:F9:C7:14:DE",  # ESP32 DevkitC v4 1 (Left arm)
+    # "08:D1:F9:DF:D7:BA",  # ESP32 DevkitC v4 2 (Right arm)
     "CD:C8:D6:CF:45:50",  # XIAO 1 (Left leg)
     "D9:4D:33:22:7F:55",  # XIAO 2 (Right leg)
 ]
 
 DEVICE_NAMES = [
-    "LEFT_ARM",
-    "RIGHT_ARM",
+    # "LEFT_ARM",
+    # "RIGHT_ARM",
     "LEFT_LEG",
     "RIGHT_LEG",
 ]
@@ -258,8 +258,7 @@ def combine_data_and_send() -> Optional[dict]:
                 return
 
 
-def save_file():
-    global data
+def save_file(data):
     fname = f"/home/raspiserver/Desktop/test_data_06_06/{datetime.datetime.now()}.json"
 
     try:
@@ -288,7 +287,7 @@ async def main():
         # Save every 10 items or 20 iterations
         if len(data) >= 10 or (count >= 20 and len(data) > 0):
             count = 0
-            save_file()
+            save_file(data)
             data.clear()
 
         # The script will crash on Linux if we create two instances of BleakScanner
