@@ -298,14 +298,16 @@ async def main():
     while True:
         combined_data = combine_data_and_send()
 
-        if count % 10 == 0:
-            if combined_data:
+        if combined_data:
+            # Only add the data if it's not None
+            data.append(combined_data)
+            if count % 10 == 0:
                 logger.info(f"Combined data: {combined_data}\n\n")
-                data.append(combined_data)
 
         count += 1
 
         # Save every 10 items or 20 iterations
+        # This ensures that the last data is saved even if it's less than 10 items
         if len(data) >= 10 or (count >= 20 and len(data) > 0):
             count = 0
             save_file(data)
