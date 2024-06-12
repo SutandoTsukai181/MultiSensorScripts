@@ -20,6 +20,10 @@ import lz4.frame
 from bleak import BleakClient, BleakScanner, BLEDevice
 from bleak.backends.characteristic import BleakGATTCharacteristic
 
+# from debug_helper import get_data_cycle
+
+# JSON_DATA_CYCLE = get_data_cycle()
+
 SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
@@ -343,6 +347,7 @@ async def main():
     while True:
         try:
             combined_data = combine_data_and_send()
+            # combined_data = next(JSON_DATA_CYCLE)
 
             if combined_data:
                 # Send combined data to server Pi
