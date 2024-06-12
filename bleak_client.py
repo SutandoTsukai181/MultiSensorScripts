@@ -16,6 +16,7 @@ from bluez_peripheral.agent import NoIoAgent
 
 import colorlog
 import msgpack
+import lz4.frame
 from bleak import BleakClient, BleakScanner, BLEDevice
 from bleak.backends.characteristic import BleakGATTCharacteristic
 
@@ -347,12 +348,17 @@ async def main():
                 # Send combined data to server Pi
                 # Note that after calling the update function, the data will not be sent until an await occurs
                 combined_data_packed = msgpack.packb(combined_data)
-                central_service.update_combined_data(combined_data_packed)
+                combined_data_compressed = lz4.frame.compress(combined_data_packed, compression_level=lz4.frame.COMPRESSIONLEVEL_MINHC + 5)
+                central_service.update_combined_data(combined_data_compressed)
+
+                if len(combined_data_compressed) >= 512:
+                    logger.error(f"Combined data size ({len(combined_data_compressed)} bytes) exceeds 512 bytes")
 
                 # Only add the data if it's not None
                 data.append(combined_data)
                 if count % 10 == 0:
-                    logger.info(f"Combined data: {combined_data}\n\n")
+                    logger.info(f"Combined data ({len(combined_data_compressed)} bytes): {combined_data}\n\n")
+                    # logger.info(f"Combined data packed: {combined_data_packed}\n\n")
 
             count += 1
 
