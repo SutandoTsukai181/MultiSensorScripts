@@ -1,11 +1,18 @@
 import asyncio
 import concurrent.futures
 import datetime
+from enum import IntEnum
 import json
 import logging
 import time
 from collections import deque
 from typing import Optional
+
+from bluez_peripheral.gatt.service import Service
+from bluez_peripheral.gatt.characteristic import characteristic, CharacteristicFlags as CharFlags
+from bluez_peripheral.util import Adapter, get_message_bus
+from bluez_peripheral.advert import Advertisement
+from bluez_peripheral.agent import NoIoAgent
 
 import colorlog
 import msgpack
@@ -29,6 +36,11 @@ DEVICE_NAMES = [
     "RIGHT_LEG",
 ]
 
+class NodeStatus(IntEnum):
+    UNAVAILABLE = 0  # Device was not found at the start
+    CONNECTED = 1
+    DISCONNECTED = 2
+    RECONNECTING = 3
 
 class TimedQueue:
     def __init__(self, time_threshold):
@@ -71,10 +83,22 @@ class TimedQueue:
     def clear(self):
         self.queue.clear()
 
+class CentralService(Service):
+    def __init__(self):
+        super().__init__(SERVICE_UUID, True)
+
+    @characteristic(CHARACTERISTIC_UUID, CharFlags.NOTIFY)
+    def combined_data(self, options): ...
+
+    def update_combined_data(self, data):
+        """Note that notification is asynchronous (you must await something at some point after calling this)."""
+        self.combined_data.changed(data)
+
 
 DATA_VALIDITY_THRESHOLD = 0.300
 
 bleak_clients: list[Optional[BleakClient]] = [None] * len(DEVICES)
+client_statuses = [NodeStatus.UNAVAILABLE] * len(DEVICES)
 
 notification_queues = [TimedQueue(DATA_VALIDITY_THRESHOLD) for _ in DEVICES]
 
@@ -109,6 +133,7 @@ def thread_callback(callback, *args):
 def disconnect_client(index: int, client: BleakClient):
     logger.error(f"Disconnected from {DEVICE_NAMES[index]}")
     bleak_clients[index] = None
+    client_statuses[index] = NodeStatus.DISCONNECTED
 
 
 CONNECTION_TIMEOUT = 8
@@ -141,6 +166,7 @@ async def add_client(index: int, device: BLEDevice):
 
         # Add the client to the list
         bleak_clients[index] = client
+        client_statuses[index] = NodeStatus.CONNECTED
     except TimeoutError:
         logger.error(f"Connection to {DEVICE_NAMES[index]} timed out")
         await client.disconnect()
@@ -187,6 +213,7 @@ async def check_and_reconnect():
                         print((bd.name, bd.address))
                         if bd.address in addresses:
                             scanned_devices[bd.address] = bd
+                            client_statuses[indices[addresses.index(bd.address)]] = NodeStatus.RECONNECTING
 
                             # Stop once we find all addresses
                             if len(scanned_devices) == len(addresses):
@@ -199,7 +226,7 @@ async def check_and_reconnect():
     is_scanning = False
 
     for bd in scanned_devices.values():
-        await asyncio.sleep(1)  # Sleep for a while before connecting
+        await asyncio.sleep(0.5)  # Sleep for a while before connecting
         logger.info(f"Connecting to {bd.name} at {bd.address}")
         await add_client(indices[addresses.index(bd.address)], bd)
 
@@ -265,11 +292,10 @@ def combine_data_and_send() -> Optional[dict]:
 
                 for i, n in enumerate(latest_notifications):
                     last_i = i
-                    combined_data[DEVICE_NAMES[i]] = msgpack.unpackb(n[1])
-                    # combined_data[DEVICE_NAMES[i]] = json.loads(n[1].decode())
-
-                # Send combined data to server Pi
-                # combined_data_packed = msgpack.packb(combined_data)
+                    combined_data[DEVICE_NAMES[i]] = dict()
+                    combined_data[DEVICE_NAMES[i]]["data"] = msgpack.unpackb(n[1])
+                    combined_data[DEVICE_NAMES[i]]["status"] = int(client_statuses[i])
+                    # combined_data[DEVICE_NAMES[i]]["data"] = json.loads(n[1].decode())
 
                 return combined_data
             except Exception as e:
@@ -292,33 +318,59 @@ def save_file(data):
 
 
 async def main():
+    # Alternativly you can request this bus directly from dbus_next.
+    bus = await get_message_bus()
+
+    # Create the service and register it
+    central_service = CentralService()
+    await central_service.register(bus)
+
+    # An agent is required to handle pairing 
+    agent = NoIoAgent()
+    # This script needs superuser for this to work. (not really)
+    await agent.register(bus)
+
+    adapter = await Adapter.get_first(bus)
+
+    # Start an advert that will last forever.
+    advert = Advertisement("CENTRAL_PI", [SERVICE_UUID], 0, timeout=0)
+    await advert.register(bus, adapter)
+
     count = 0
     data = []
 
     while True:
-        combined_data = combine_data_and_send()
+        try:
+            combined_data = combine_data_and_send()
 
-        if combined_data:
-            # Only add the data if it's not None
-            data.append(combined_data)
-            if count % 10 == 0:
-                logger.info(f"Combined data: {combined_data}\n\n")
+            if combined_data:
+                # Send combined data to server Pi
+                # Note that after calling the update function, the data will not be sent until an await occurs
+                combined_data_packed = msgpack.packb(combined_data)
+                central_service.update_combined_data(combined_data_packed)
 
-        count += 1
+                # Only add the data if it's not None
+                data.append(combined_data)
+                if count % 10 == 0:
+                    logger.info(f"Combined data: {combined_data}\n\n")
 
-        # Save every 10 items or 20 iterations
-        # This ensures that the last data is saved even if it's less than 10 items
-        if len(data) >= 10 or (count >= 20 and len(data) > 0):
-            count = 0
-            save_file(data)
-            data.clear()
+            count += 1
 
-        # The script will crash on Linux if we create two instances of BleakScanner
-        if not is_scanning:
-            await check_and_reconnect()
+            # Save every 10 items or 20 iterations
+            # This ensures that the last data is saved even if it's less than 10 items
+            if len(data) >= 10 or (count >= 20 and len(data) > 0):
+                count = 0
+                save_file(data)
+                data.clear()
 
-        # Sleep for a while before checking again
-        await asyncio.sleep(MAIN_LOOP_INTERVAL)
+            # The script will crash on Linux if we create two instances of BleakScanner
+            if not is_scanning:
+                await check_and_reconnect()
+
+            # Sleep for a while before checking again
+            await asyncio.sleep(MAIN_LOOP_INTERVAL)
+        except Exception as e:
+            logger.error(f"Error in main loop: {e}")
 
 
 if __name__ == "__main__":
