@@ -7,6 +7,7 @@ import logging
 import time
 from collections import deque
 from typing import Optional
+import subprocess
 
 from bluez_peripheral.gatt.service import Service
 from bluez_peripheral.gatt.characteristic import characteristic, CharacteristicFlags as CharFlags
@@ -20,9 +21,8 @@ import lz4.frame
 from bleak import BleakClient, BleakScanner, BLEDevice
 from bleak.backends.characteristic import BleakGATTCharacteristic
 
-# from debug_helper import get_data_cycle
-
-# JSON_DATA_CYCLE = get_data_cycle()
+from debug_helper import get_data_cycle
+JSON_DATA_CYCLE = get_data_cycle()
 
 SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
@@ -40,6 +40,8 @@ DEVICE_NAMES = [
     "LEFT_LEG",
     "RIGHT_LEG",
 ]
+
+DEVICE_SHORT_NAMES = [''.join([x[0] for x in dn.split('_')]) for dn in DEVICE_NAMES]
 
 class NodeStatus(IntEnum):
     UNAVAILABLE = 0  # Device was not found at the start
@@ -157,7 +159,7 @@ async def add_client(index: int, device: BLEDevice):
         logger.info(f"Successfully connected to {DEVICE_NAMES[index]}")
 
         # Force discover the services (otherwise characteristic might not be found)
-        services = await client.get_services()
+        _ = await client.get_services()
         # for s in services:
         #     print(f'\nService: {s.uuid}')
         #     for c in s.characteristics:
@@ -180,6 +182,13 @@ async def add_client(index: int, device: BLEDevice):
         logger.error(f"Error connecting to {DEVICE_NAMES[index]}: {e}")
         await client.disconnect()
         return
+
+
+def restart_bluetooth():
+    subprocess.call(["bluetoothctl", "power", "off"])
+    time.sleep(0.2)
+    subprocess.call(["bluetoothctl", "power", "on"])
+    time.sleep(0.3)
 
 
 def disconnect_all():
@@ -231,16 +240,16 @@ async def check_and_reconnect():
     is_scanning = False
 
     for bd in scanned_devices.values():
-        await asyncio.sleep(0.5)  # Sleep for a while before connecting
+        await asyncio.sleep(0.3)  # Sleep for a while before connecting
         logger.info(f"Connecting to {bd.name} at {bd.address}")
         await add_client(indices[addresses.index(bd.address)], bd)
 
 
 # Intervals in seconds
-MAIN_LOOP_INTERVAL = 0.090
+MAIN_LOOP_INTERVAL = 0.120
 MAX_MCU_TIME_DIFFERENCE = 0.150
 
-MAX_CONSECUTIVE_FAIL = 5
+MAX_CONSECUTIVE_FAIL = 15
 consecutive_empty_packet_count = 0
 
 
@@ -254,7 +263,7 @@ def combine_data_and_send() -> Optional[dict]:
         ]
 
         if any(n is None for n in latest_notifications):
-            logger.warning("Skipping combined packet due to empty queues")
+            logger.warning(f"Skipping combined packet due to empty queues: {[DEVICE_NAMES[i] for i, n in enumerate(latest_notifications) if n is None]}")
             consecutive_empty_packet_count += 1
 
             if consecutive_empty_packet_count > MAX_CONSECUTIVE_FAIL:
@@ -263,6 +272,7 @@ def combine_data_and_send() -> Optional[dict]:
                 # If all devices appear to be connected, disconnect all of them to force scanning
                 if not any([bc for bc in bleak_clients if bc is None]):
                     disconnect_all()
+                    restart_bluetooth()
             return
 
         consecutive_empty_packet_count = 0
@@ -293,14 +303,14 @@ def combine_data_and_send() -> Optional[dict]:
             last_i = 0
             try:
                 combined_data = dict()
-                combined_data["time"] = time.time()
+                combined_data["t"] = time.time()
 
                 for i, n in enumerate(latest_notifications):
                     last_i = i
-                    combined_data[DEVICE_NAMES[i]] = dict()
-                    combined_data[DEVICE_NAMES[i]]["data"] = msgpack.unpackb(n[1])
-                    combined_data[DEVICE_NAMES[i]]["status"] = int(client_statuses[i])
-                    # combined_data[DEVICE_NAMES[i]]["data"] = json.loads(n[1].decode())
+                    combined_data[DEVICE_SHORT_NAMES[i]] = dict()
+                    combined_data[DEVICE_SHORT_NAMES[i]]["d"] = msgpack.unpackb(n[1])
+                    combined_data[DEVICE_SHORT_NAMES[i]]["s"] = int(client_statuses[i])
+                    # combined_data[DEVICE_SHORT_NAMES[i]]["data"] = json.loads(n[1].decode())
 
                 return combined_data
             except Exception as e:
@@ -371,7 +381,7 @@ async def main():
             # This ensures that the last data is saved even if it's less than 10 items
             if len(data) >= 10 or (count >= 20 and len(data) > 0):
                 count = 0
-                save_file(data)
+                # save_file(data)
                 data.clear()
 
             # The script will crash on Linux if we create two instances of BleakScanner
